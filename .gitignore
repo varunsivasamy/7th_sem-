@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Video files (do not commit)
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# MediaPipe model files (auto-downloaded at runtime)
+*.task
+
+# OS
+Thumbs.db
+.DS_Store
