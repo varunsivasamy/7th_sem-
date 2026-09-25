@@ -115,8 +115,14 @@ class BlobDetector:
 
         bx, by, bw, bh = cv2.boundingRect(largest)
         aspect_ratio = bw / (bh + 1e-6)
+
+        # Reject extremely wide non-human background blobs (e.g. aspect ratio > 2.5)
+        if aspect_ratio > 2.5:
+            return {}, 0
+
         hip_y_norm   = (by + bh * 0.6) / (h + 1e-6)
         center_x     = bx + bw / 2
+
 
         # Torso angle from minAreaRect
         rect      = cv2.minAreaRect(largest)
@@ -132,8 +138,12 @@ class BlobDetector:
             "hip_y_norm":         float(hip_y_norm),
             "torso_len_norm":     float(bh / (h + 1e-6)),
             "visibility_ok":      True,
+            "is_pose_valid":      False,
+            "is_blob_fallback":   True,
             "_blob_rect":         (bx, by, bw, bh),
             "_blob_area":         float(area),
+
+
         }
         return feat, area
 

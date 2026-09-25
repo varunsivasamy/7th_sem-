@@ -32,11 +32,11 @@ import cv2
 import numpy as np
 
 import config
-from src.pose_estimator    import PoseEstimator
+from src.yolo_pose_estimator import YoloPoseEstimator
 from src.blob_detector     import BlobDetector
 from src.feature_extractor import compute_features
 from src.fall_detector     import FallDetector
-from src.visualization     import draw_status_overlay
+from src.visualization     import draw_status_overlay, draw_human_bounding_box
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ def main():
     print(f"[INFO] FPS    : {video_fps:.2f}  |  Frames: {total_frames}  "
           f"({total_frames/video_fps:.1f}s)")
 
-    pose     = PoseEstimator()
+    pose     = YoloPoseEstimator(conf_thresh=0.45)
     blob     = BlobDetector()
     detector = FallDetector(video_fps=video_fps)
 
@@ -131,41 +131,39 @@ def main():
         proc = cv2.resize(frame, (config.PROCESS_WIDTH, config.PROCESS_HEIGHT))
         h, w = proc.shape[:2]
 
-        # ── MediaPipe pose ────────────────────────────────────────────
-        rgb       = cv2.cvtColor(proc, cv2.COLOR_BGR2RGB)
-        mp_result = pose.process(rgb)
-        landmarks = pose.extract_landmarks(mp_result, w, h)
-        mp_feat   = compute_features(landmarks, w, h) if landmarks else {}
+        # ── YOLO Pose ─────────────────────────────────────────────────
+        rgb         = cv2.cvtColor(proc, cv2.COLOR_BGR2RGB)
+        yolo_result = pose.process(rgb)
+        landmarks   = pose.extract_landmarks(yolo_result, w, h)
+        mp_feat     = compute_features(landmarks, w, h) if landmarks else {}
 
         # ── OpenCV blob fallback ──────────────────────────────────────
         blob_feat, fg_mask = blob.update(proc)
 
-        # ── Choose features: prefer MediaPipe, fall back to blob ──────
-        using_mp = bool(mp_feat.get("visibility_ok"))
-        features = mp_feat if using_mp else blob_feat
-        source   = "MP" if using_mp else "BL"
+        # ── Choose features: rely strictly on verified YOLO pose ────────
+        using_pose = bool(mp_feat.get("is_pose_valid"))
+        features   = mp_feat if using_pose else {}
+        source     = "YOLO" if using_pose else "NONE"
+
 
         # ── Fall detection ────────────────────────────────────────────
         status    = detector.update(features, video_time_sec)
         countdown = detector.countdown_remaining(video_time_sec)
 
-        # ── Draw skeleton (MP) or blob rect (fallback) ────────────────
-        if using_mp:
-            pose.draw_skeleton(proc, mp_result)
-        else:
-            draw_blob(proc, blob_feat)
+        # ── Draw skeleton (YOLO) ──────────────────────────────────────
+        if using_pose:
+            pose.draw_skeleton(proc, yolo_result)
 
-        # ── Source indicator (top-right) ──────────────────────────────
-        src_label = f"Detector: {source}"
-        src_color = (0, 220, 0) if using_mp else (0, 165, 255)
-        cv2.putText(proc, src_label, (w - 130, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 3, cv2.LINE_AA)
-        cv2.putText(proc, src_label, (w - 130, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, src_color, 1, cv2.LINE_AA)
+        # ── Draw Human Tracking Bounding Box (Only on verified pose) ──
+        bbox_rect = features.get("_bbox_rect")
+        if using_pose and bbox_rect:
+            proc = draw_human_bounding_box(proc, bbox_rect, status, source)
 
-        # ── Overlay ───────────────────────────────────────────────────
-        draw_status_overlay(proc, status, fps_display, features,
-                            detector.persist_count, countdown)
+
+        # ── Overlay HUD & Glass Alert Cards ───────────────────────────
+        proc = draw_status_overlay(proc, status, fps_display, features,
+                                   detector.persist_count, countdown)
+
 
         # ── Resize for display / output ───────────────────────────────
         display = cv2.resize(proc, (config.DISPLAY_WIDTH, config.DISPLAY_HEIGHT))
@@ -196,7 +194,8 @@ def main():
     pose.close()
     if writer:
         writer.release()
-        print(f"[INFO] Saved → {args.output}")
+        print(f"[INFO] Saved -> {args.output}")
+
     cv2.destroyAllWindows()
     print("[INFO] Done.")
 

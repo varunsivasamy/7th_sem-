@@ -50,7 +50,8 @@ def compute_features(landmarks: dict, frame_w: int, frame_h: int) -> dict:
     rh = landmarks["right_hip"]
 
     # Visibility gate – skip if major landmarks are unreliable
-    vis_ok = all(landmarks[k][2] > 0.4 for k in required)
+    vis_ok = all(landmarks[k][2] > 0.25 for k in required)
+
 
     shoulder_center = _midpoint(ls, rs)
     hip_center      = _midpoint(lh, rh)
@@ -77,22 +78,43 @@ def compute_features(landmarks: dict, frame_w: int, frame_h: int) -> dict:
     )
     torso_len_norm = torso_len / (frame_h + 1e-6)
 
-    # ── Bounding box of all 8 key points ─────────────────────────
+    # ── Full-body Bounding Box computation ────────────────────────
     xs, ys = [], []
-    for name in ["left_shoulder", "right_shoulder",
-                 "left_hip",      "right_hip",
-                 "left_knee",     "right_knee",
-                 "left_ankle",    "right_ankle"]:
-        if name in landmarks:
-            xs.append(landmarks[name][0])
-            ys.append(landmarks[name][1])
+    all_pts = landmarks.get("_all_points", [])
 
-    if len(xs) >= 4:
-        bbox_w = max(xs) - min(xs)
-        bbox_h = max(ys) - min(ys)
-        aspect_ratio = bbox_w / (bbox_h + 1e-6)
+    if all_pts:
+        for px, py, vis in all_pts:
+            if vis > 0.3:
+                xs.append(px)
+                ys.append(py)
+
+    if not xs:
+        # Fallback to key landmarks
+        for name in landmarks:
+            if not name.startswith("_"):
+                pt = landmarks[name]
+                if pt[2] > 0.3:
+                    xs.append(pt[0])
+                    ys.append(pt[1])
+
+    if len(xs) >= 2:
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        # Add 10% padding around person body
+        pad_x = max(12, int((max_x - min_x) * 0.12))
+        pad_y = max(12, int((max_y - min_y) * 0.12))
+
+        bx = max(0, min_x - pad_x)
+        by = max(0, min_y - pad_y)
+        bw = min(frame_w - bx, (max_x - min_x) + 2 * pad_x)
+        bh = min(frame_h - by, (max_y - min_y) + 2 * pad_y)
+
+        aspect_ratio = float(bw) / float(bh + 1e-6)
+        bbox_rect = (bx, by, bw, bh)
     else:
         aspect_ratio = 0.0
+        bbox_rect = None
 
     hip_y_norm = hip_center[1] / (frame_h + 1e-6)
 
@@ -105,4 +127,8 @@ def compute_features(landmarks: dict, frame_w: int, frame_h: int) -> dict:
         "hip_y_norm":         hip_y_norm,
         "torso_len_norm":     torso_len_norm,
         "visibility_ok":      vis_ok,
+        "is_pose_valid":      vis_ok,
+        "_bbox_rect":         bbox_rect,
+
     }
+

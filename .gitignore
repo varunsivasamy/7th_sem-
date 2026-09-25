@@ -24,8 +24,9 @@ env/
 *.mov
 *.mkv
 
-# MediaPipe model files (auto-downloaded at runtime)
+# Weights & Models
 *.task
+*.pt
 
 # OS
 Thumbs.db

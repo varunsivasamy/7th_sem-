@@ -68,6 +68,8 @@ class FallDetector:
         # Phase-2
         self._no_response       = False
         self._red_alert_end_t   = None    # video-time when red alert expires
+        self._last_recovery_t   = None
+
 
     # ------------------------------------------------------------------ #
     def update(self, features: dict, video_time_sec: float) -> str:
@@ -90,14 +92,16 @@ class FallDetector:
             else:
                 return STATUS_NO_RESPONSE
 
-        # ── No usable pose ────────────────────────────────────────────
-        if not features or not features.get("visibility_ok", False):
+        # ── No valid human pose ───────────────────────────────────────
+        if not features or not features.get("is_pose_valid", False):
             if self._fall_detected:
-                if t - self._fall_start_t >= config.NO_RESPONSE_SECONDS:
+                elapsed = t - self._fall_start_t
+                if elapsed >= config.NO_RESPONSE_SECONDS:
                     self._trigger_red(t)
                     return STATUS_NO_RESPONSE
                 return STATUS_FALL_WARN
             return STATUS_NO_POSE
+
 
         # ── Update rolling histories ──────────────────────────────────
         self._hip_y_history.append(features["hip_y_norm"])
@@ -107,17 +111,15 @@ class FallDetector:
 
         # ── Already in warning phase ──────────────────────────────────
         if self._fall_detected:
-            if self._is_upright(features):
-                self._recovery_count += 1
-                # Require several consecutive upright frames to confirm recovery
-                if self._recovery_count >= config.RECOVERY_PERSISTENCE_FRAMES:
-                    self._fall_detected  = False
-                    self._fall_start_t   = None
-                    self._persist_count  = 0
-                    self._recovery_count = 0
-                    return STATUS_NORMAL
-            else:
-                self._recovery_count = 0   # reset if not upright
+            if self._is_recovering(features):
+                # Instantly cancel countdown on the very first frame of wake up / standing
+                self._fall_detected   = False
+                self._fall_start_t    = None
+                self._persist_count   = 0
+                self._recovery_count  = 0
+                self._last_recovery_t = t
+                return STATUS_NORMAL
+
 
             elapsed = t - self._fall_start_t
             if elapsed >= config.NO_RESPONSE_SECONDS:
@@ -127,9 +129,14 @@ class FallDetector:
             return STATUS_FALL_WARN   # green phase, countdown running
 
         # ── Normal evaluation ─────────────────────────────────────────
-        # Skip detection during warm-up period
         if t < config.WARMUP_SECONDS:
             return STATUS_NORMAL
+
+        # Post-recovery window: allow 3.0 seconds for person to fully stand up without re-triggering
+        if hasattr(self, "_last_recovery_t") and self._last_recovery_t is not None:
+            if t - self._last_recovery_t < 3.0:
+                return STATUS_NORMAL
+
         if self._evaluate():
             self._persist_count += 1
         else:
@@ -142,6 +149,7 @@ class FallDetector:
             return STATUS_FALL_WARN
 
         return STATUS_NORMAL
+
 
     # ------------------------------------------------------------------ #
     def _trigger_red(self, t: float):
@@ -162,26 +170,63 @@ class FallDetector:
         self._ratio_history.clear()
 
     # ------------------------------------------------------------------ #
-    def _is_upright(self, features: dict) -> bool:
-        ratio_ok = features.get("aspect_ratio",     1.0) < config.RECOVERY_ASPECT_RATIO
-        angle_ok = features.get("torso_angle_deg",   90) < config.TORSO_ANGLE_FALL_THRESHOLD
-        shld_ok  = features.get("shoulder_angle_deg", 90) < config.SHOULDER_ANGLE_FALL_THRESHOLD
-        return ratio_ok and angle_ok and shld_ok
+    def _is_recovering(self, features: dict) -> bool:
+        """
+        Check if a fallen person is getting back up / standing up.
+        Cancels countdown immediately when posture returns upright or hip moves upward.
+        """
+        angle = features.get("torso_angle_deg", 90.0)
+        ratio = features.get("aspect_ratio", 1.0)
+        shld  = features.get("shoulder_angle_deg", 90.0)
+        hip_y = features.get("hip_y_norm", 1.0)
+
+        # Posture returning upright (person lifting head/torso or sitting/standing up)
+        upright_posture = (angle < 50.0) and (shld < 45.0) and (ratio < 0.75)
+
+
+        # Hip Y moving UPWARD back toward standing position
+        hip_upward = False
+        if len(self._hip_y_history) >= 3:
+            hips = list(self._hip_y_history)
+            lowest_hip = max(hips)
+            if (lowest_hip - hip_y) > 0.04 and angle < 55.0:
+                hip_upward = True
+
+        return upright_posture or hip_upward
 
     # ------------------------------------------------------------------ #
     def _evaluate(self) -> bool:
-        if len(self._hip_y_history) < 2:
+        """
+        Evaluate if a human fall onto the floor has occurred.
+        Distinguishes bending over (standing, hips elevated) vs falling (hips dropped low + horizontal posture).
+        """
+        if not self._angle_history or not self._hip_y_history:
             return False
 
-        posture_ok = (
-            self._angle_history[-1]     > config.TORSO_ANGLE_FALL_THRESHOLD or
-            self._shoulder_ang_hist[-1] > config.SHOULDER_ANGLE_FALL_THRESHOLD
-        )
-        ratio_ok    = self._ratio_history[-1] > config.ASPECT_RATIO_FALL_THRESHOLD
-        hip_arr     = list(self._hip_y_history)
-        movement_ok = (max(hip_arr) - min(hip_arr)) > config.HIP_MOVEMENT_THRESHOLD
+        angle = self._angle_history[-1]
+        shld  = self._shoulder_ang_hist[-1]
+        ratio = self._ratio_history[-1]
+        hip_y = self._hip_y_history[-1]
 
-        return posture_ok and ratio_ok and movement_ok
+        # 1. Standing posture gate: if torso is upright (< 35°) AND ratio is narrow (< 0.70), NOT a fall
+        if angle < 35.0 and ratio < 0.70:
+            return False
+
+        # 2. Bending over while standing (hips elevated in upper half of frame, hip_y < 0.52 and narrow ratio)
+        if hip_y < 0.52 and ratio < 0.85:
+            return False
+
+        # 3. Real Fall on floor: Torso horizontal (angle > 38°), shoulder tilt (shld > 20°), or wide aspect ratio (> 0.80)
+        posture_fallen = (angle > 38.0) or (shld > 22.0)
+        ratio_fallen   = (ratio > 0.80)
+        ground_level   = (hip_y > 0.55)  # hips low in frame near floor
+
+        return (posture_fallen or ratio_fallen) and ground_level
+
+
+
+
+
 
     # ------------------------------------------------------------------ #
     def countdown_remaining(self, video_time_sec: float) -> float:
